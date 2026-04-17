@@ -304,6 +304,58 @@ class OrderPricingTestCase(unittest.TestCase):
         self.assertEqual(order.items[0].line_total, 47000)
         self.assertEqual(order.subtotal, 47000)
 
+    def test_update_item_prefers_unique_name_match_when_ai_index_is_wrong(self) -> None:
+        order = get_or_create_draft_order(self.db, "test-user-11")
+        add_item_to_order(
+            db=self.db,
+            order=order,
+            item_name="Tra Sua Tran Chau Den",
+            size="M",
+            quantity=1,
+            toppings=[],
+            unit_price=35000,
+            topping_price_map={},
+        )
+        add_item_to_order(
+            db=self.db,
+            order=order,
+            item_name="Tra Vai Thieu",
+            size="L",
+            quantity=1,
+            toppings=[],
+            unit_price=43000,
+            topping_price_map={},
+        )
+        add_item_to_order(
+            db=self.db,
+            order=order,
+            item_name="Ca Phe Den",
+            size="M",
+            quantity=1,
+            toppings=[],
+            unit_price=25000,
+            topping_price_map={},
+        )
+
+        updated = update_order_item(
+            self.db,
+            order,
+            item_index=2,
+            item_name="Ca Phe Den",
+            size="M",
+            updated_item_size="L",
+            updated_base_unit_price=30000,
+            topping_price_map={},
+        )
+
+        self.db.refresh(order)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["item_name"], "Ca Phe Den")
+        self.assertEqual(updated["size"], "L")
+        self.assertEqual(order.items[1].size, "L")
+        self.assertEqual(order.items[2].size, "L")
+        self.assertEqual(order.items[2].unit_price, 30000)
+
     def test_update_item_sugar_and_ice(self) -> None:
         order = get_or_create_draft_order(self.db, "test-user-10")
         add_item_to_order(

@@ -22,18 +22,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--message",
-        help="Tin nhắn để test Gemini. Bắt buộc khi chạy --suite gemini hoặc all.",
+        help="Tin nhắn để test AI parse/reply. Bắt buộc khi chạy --suite gemini hoặc all.",
     )
     parser.add_argument(
         "--gemini-mode",
         choices=["parse", "reply", "both"],
         default="both",
-        help="Chế độ test Gemini.",
+        help="Chế độ test AI parse/reply.",
     )
     parser.add_argument(
         "--cart",
         default="Giỏ hàng đang trống.",
-        help="Giỏ hàng giả lập khi test Gemini.",
+        help="Giỏ hàng giả lập khi test AI.",
     )
     return parser
 
@@ -56,7 +56,7 @@ def main() -> None:
     if args.suite in {"gemini", "all"}:
         if not args.message:
             raise SystemExit("Cần truyền --message khi chạy suite Gemini.")
-        print("\n=== RUNNING GEMINI CHECK ===")
+        print("\n=== RUNNING AI CHECK ===")
         run_gemini_check(message=args.message, mode=args.gemini_mode, cart=args.cart)
 
     if not success:

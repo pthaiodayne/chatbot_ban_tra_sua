@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import logging
+import re
 
 from fastapi import FastAPI, Request
 
@@ -10,7 +11,7 @@ from app.chat_service import get_recent_chat_messages, render_chat_history, save
 from app.customer_service import get_or_create_customer_profile, update_customer_profile
 from app.database import Base, SessionLocal, engine
 from app.logging_config import setup_logging
-from app.gemini_service import GeminiService
+from app.llm_service import GeminiService
 from app.menu_service import MenuService
 from app.models import Order
 from app.order_service import (
@@ -31,7 +32,7 @@ setup_logging()
 
 app = FastAPI(title="Milk Tea Bot")
 Base.metadata.create_all(bind=engine)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("llm_service")
 
 
 ACTIONABLE_KEYWORDS = (
@@ -77,6 +78,24 @@ PAYMENT_CONFIRM_KEYWORDS = (
     "ok thanh toan",
 )
 
+PAYMENT_REQUEST_KEYWORDS = (
+    "thanh toán",
+    "thanh toan",
+    "trả tiền",
+    "tra tien",
+    "chuyển khoản",
+    "chuyen khoan",
+    "/pay",
+)
+
+CHECKOUT_REQUEST_KEYWORDS = (
+    "chốt đơn",
+    "chot don",
+    "checkout",
+    "đặt đơn",
+    "dat don",
+)
+
 
 def looks_like_actionable_message(text: str) -> bool:
     normalized = text.strip().lower()
@@ -86,6 +105,33 @@ def looks_like_actionable_message(text: str) -> bool:
 def is_payment_confirmation_message(text: str) -> bool:
     normalized = text.strip().lower()
     return normalized == "/confirm_pay" or any(keyword in normalized for keyword in PAYMENT_CONFIRM_KEYWORDS)
+
+
+def looks_like_payment_request(text: str) -> bool:
+    normalized = text.strip().lower()
+    return any(keyword in normalized for keyword in PAYMENT_REQUEST_KEYWORDS)
+
+
+def looks_like_checkout_request(text: str) -> bool:
+    normalized = text.strip().lower()
+    return any(keyword in normalized for keyword in CHECKOUT_REQUEST_KEYWORDS)
+
+
+def extract_explicit_item_index(text: str) -> int | None:
+    normalized = text.strip().lower()
+    patterns = (
+        r"(?:m[oó]n|mon|ly)\s*s[oố]\s*(\d+)",
+        r"(?:m[oó]n|mon|ly)\s*(\d+)",
+        r"s[oố]\s*(\d+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    return None
 
 
 def compose_reply(
@@ -149,6 +195,38 @@ def render_payment_confirmation(order: Order) -> str:
         "Nếu đúng, nhắn /confirm_pay hoặc 'xác nhận thanh toán'.\n"
         "Nếu cần sửa, bạn chỉ cần nhắn lại tên, số điện thoại của bạn hoặc địa chỉ mới."
     )
+
+
+def maybe_advance_order_after_customer_info(
+    db,
+    order: Order,
+    *,
+    user_message: str,
+    conversation_history: str,
+) -> str | None:
+    if not order.items or order.payment_status == "paid" or not has_complete_customer_info(order):
+        return None
+
+    normalized_context = f"{conversation_history}\n{user_message}".lower()
+    wants_payment = looks_like_payment_request(normalized_context)
+    wants_checkout = looks_like_checkout_request(normalized_context) or wants_payment
+
+    if not wants_checkout:
+        return None
+
+    if order.order_status == "draft":
+        order.order_status = "confirmed"
+
+    if wants_payment and order.order_status == "confirmed":
+        order.order_status = "awaiting_payment_confirmation"
+
+    db.commit()
+    db.refresh(order)
+
+    if order.order_status == "awaiting_payment_confirmation":
+        return render_payment_confirmation(order)
+
+    return render_order_summary(order)
 
 
 def sync_customer_info(
@@ -617,6 +695,8 @@ async def telegram_webhook(request: Request) -> dict:
                 return {"ok": True}
 
             intent = ai_result.get("intent")
+            if looks_like_payment_request(text) and not is_payment_confirmation_message(text):
+                intent = "pay"
 
             if intent == "add_item":
                 add_item = ai_result.get("add_item") or {}
@@ -750,6 +830,9 @@ async def telegram_webhook(request: Request) -> dict:
 
                 update_item = ai_result.get("update_item") or {}
                 item_index = update_item.get("cart_item_index")
+                explicit_item_index = extract_explicit_item_index(text)
+                if explicit_item_index is not None:
+                    item_index = explicit_item_index
                 item_name = (update_item.get("item_name") or "").strip() or None
                 current_size = (update_item.get("size") or "").strip() or None
                 new_size = (update_item.get("new_size") or "").strip() or None
@@ -791,7 +874,7 @@ async def telegram_webhook(request: Request) -> dict:
                 normalized_new_size = None
                 if new_size:
                     target_lookup_name = item_name
-                    if item_index is not None and 0 < item_index <= len(order.items):
+                    if not target_lookup_name and item_index is not None and 0 < item_index <= len(order.items):
                         target_lookup_name = order.items[item_index - 1].item_name
                     if not target_lookup_name:
                         reply_text = build_natural_action_reply(
@@ -1035,6 +1118,12 @@ async def telegram_webhook(request: Request) -> dict:
                     address=customer_info.get("address"),
                     note=customer_info.get("note"),
                 )
+                follow_up_text = maybe_advance_order_after_customer_info(
+                    db,
+                    order,
+                    user_message=text,
+                    conversation_history=conversation_history,
+                )
                 reply_text = ai_result.get("reply") or "Mình đã lưu thông tin của bạn."
                 reply_text = build_natural_action_reply(
                     user_message=text,
@@ -1046,7 +1135,9 @@ async def telegram_webhook(request: Request) -> dict:
                     conversation_history=conversation_history,
                     fallback_reply="Mình đã lưu thông tin của bạn.",
                 )
-                if order.order_status == "awaiting_payment_confirmation":
+                if follow_up_text:
+                    reply_text += "\n\n" + follow_up_text
+                elif order.order_status == "awaiting_payment_confirmation":
                     reply_text += "\n\n" + render_payment_confirmation(order)
                 send_bot_message(db, chat_id, telegram_user_id, reply_text)
 
@@ -1174,6 +1265,11 @@ async def telegram_webhook(request: Request) -> dict:
                     send_bot_message(db, chat_id, telegram_user_id, reply_text)
                     return {"ok": True}
 
+                if order.order_status == "draft" and has_complete_customer_info(order):
+                    order.order_status = "confirmed"
+                    db.commit()
+                    db.refresh(order)
+
                 if order.order_status != "confirmed":
                     reply_text = build_natural_action_reply(
                         user_message=text,
@@ -1249,6 +1345,37 @@ async def telegram_webhook(request: Request) -> dict:
                 )
 
             else:
+                if looks_like_payment_request(text) and order.items and order.payment_status != "paid":
+                    if order.order_status == "draft" and has_complete_customer_info(order):
+                        order.order_status = "confirmed"
+                        db.commit()
+                        db.refresh(order)
+                    if order.order_status == "confirmed":
+                        order.order_status = "awaiting_payment_confirmation"
+                        db.commit()
+                        db.refresh(order)
+                        confirmation_text = render_payment_confirmation(order)
+                        send_bot_message(
+                            db,
+                            chat_id,
+                            telegram_user_id,
+                            compose_reply(
+                                build_natural_action_reply(
+                                    user_message=text,
+                                    suggested_reply=ai_result.get("reply"),
+                                    system_result="Hệ thống đã chuyển đơn sang bước chờ khách xác nhận thanh toán.",
+                                    menu_text=menu_text,
+                                    toppings_text=toppings_text,
+                                    cart_text=confirmation_text,
+                                    conversation_history=conversation_history,
+                                    fallback_reply="Mình đã lấy thông tin hiện có từ hệ thống để bạn xác nhận lại trước khi thanh toán.",
+                                ),
+                                "Mình đã lấy thông tin hiện có từ hệ thống để bạn xác nhận lại trước khi thanh toán.",
+                                confirmation_text,
+                            ),
+                        )
+                        return {"ok": True}
+
                 reply = ai_result.get("reply") or gemini_service.generate_customer_reply(
                     user_message=text,
                     menu_text=menu_service.get_menu_text(),

@@ -8,6 +8,30 @@ from app.menu_service import normalize_text
 from app.models import Order, OrderItem
 
 
+def _sorted_order_items(order: Order) -> list[OrderItem]:
+    return sorted(order.items, key=lambda item: (item.id or 0, item.item_name))
+
+
+def _item_name_matches(order_item_name: str, target_item_name: str) -> bool:
+    normalized_order_name = normalize_text(order_item_name)
+    normalized_target_name = normalize_text(target_item_name)
+    return (
+        normalized_order_name == normalized_target_name
+        or normalized_target_name in normalized_order_name
+        or normalized_order_name in normalized_target_name
+    )
+
+
+def _item_matches(order_item: OrderItem, *, item_name: str | None = None, size: str | None = None) -> bool:
+    if item_name and not _item_name_matches(order_item.item_name, item_name):
+        return False
+
+    if size and normalize_text(order_item.size) != normalize_text(size):
+        return False
+
+    return True
+
+
 def get_or_create_active_order(db: Session, telegram_user_id: str) -> Order:
     order = (
         db.query(Order)
@@ -36,20 +60,27 @@ def _find_target_item(
     item_name: str | None = None,
     size: str | None = None,
 ) -> OrderItem | None:
+    sorted_items = _sorted_order_items(order)
+    indexed_candidate: OrderItem | None = None
+
     if item_index is not None:
-        if item_index <= 0 or item_index > len(order.items):
+        if 0 < item_index <= len(sorted_items):
+            indexed_candidate = sorted_items[item_index - 1]
+        elif not item_name:
             return None
-        return order.items[item_index - 1]
 
     if item_name:
-        normalized_item_name = normalize_text(item_name)
-        normalized_size = normalize_text(size) if size else None
-        for item in order.items:
-            if normalize_text(item.item_name) != normalized_item_name:
-                continue
-            if normalized_size and normalize_text(item.size) != normalized_size:
-                continue
-            return item
+        if indexed_candidate and _item_matches(indexed_candidate, item_name=item_name, size=size):
+            return indexed_candidate
+
+        matched_items = [item for item in sorted_items if _item_matches(item, item_name=item_name, size=size)]
+        if len(matched_items) == 1:
+            return matched_items[0]
+        if indexed_candidate:
+            return indexed_candidate
+
+    if indexed_candidate:
+        return indexed_candidate
 
     return None
 
@@ -308,7 +339,7 @@ def render_cart(order: Order) -> str:
         return "Giỏ hàng đang trống."
 
     lines = [f"Đơn #{order.id}"]
-    for idx, item in enumerate(order.items, start=1):
+    for idx, item in enumerate(_sorted_order_items(order), start=1):
         details = []
         if item.toppings:
             details.append(f"topping: {item.toppings.replace('|', ', ')}")
@@ -340,7 +371,7 @@ def render_order_summary(order: Order) -> str:
         f"Địa chỉ: {address}",
         "Món:",
     ]
-    for idx, item in enumerate(order.items, start=1):
+    for idx, item in enumerate(_sorted_order_items(order), start=1):
         topping_text = f" | topping: {item.toppings.replace('|', ', ')}" if item.toppings else ""
         lines.append(
             f"{idx}. {item.item_name} - size {item.size} - SL {item.quantity} - {item.line_total:,}đ{topping_text}"

@@ -4,4 +4,4 @@ sqlalchemy
 requests
 python-dotenv
 pandas
-google-genai
+openai

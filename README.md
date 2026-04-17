@@ -3,7 +3,7 @@
 Bot Telegram cho quán đồ uống, dùng:
 - FastAPI
 - Telegram Bot API (webhook)
-- Gemini API (xử lý tin nhắn tự nhiên)
+- OpenAI API (xử lý tin nhắn tự nhiên)
 - SQLite + SQLAlchemy
 - Menu đọc từ `data/menu.csv`
 
@@ -20,7 +20,7 @@ Bot Telegram cho quán đồ uống, dùng:
 pip install -r requirements.txt
 ```
 
-Tạo file `.env` từ `.env.example`, rồi điền token bot, URL public và Gemini API key nếu muốn bot hiểu tin nhắn tự nhiên.
+Tạo file `.env` từ `.env.example`, rồi điền token bot, URL public và OpenAI API key nếu muốn bot hiểu tin nhắn tự nhiên.
 
 ## Chạy app local sau khi đã cài đặt và cấu hình `.env`:
 ```bash
@@ -55,7 +55,7 @@ uvicorn app.main:app --reload
 /confirm_pay
 ```
 
-Ví dụ tin nhắn tự nhiên khi đã cấu hình `GEMINI_API_KEY/OPENAI_API_KEY`:
+Ví dụ tin nhắn tự nhiên khi đã cấu hình `OPENAI_API_KEY`:
 ```text
 Cho mình 2 trà sữa truyền thống size L thêm kem tươi
 Mình tên An, số điện thoại của mình là 09..., địa chỉ 123 Nguyễn Trãi

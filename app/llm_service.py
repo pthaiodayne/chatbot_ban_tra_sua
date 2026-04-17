@@ -5,32 +5,33 @@ import logging
 import re
 
 from typing import Any
-from google import genai
-from app.config import GEMINI_API_KEY, GEMINI_MODEL
+from openai import OpenAI
 
-logger = logging.getLogger("gemini_service")
+from app.config import OPENAI_API_KEY, OPENAI_MODEL
 
-class GeminiConfigError(RuntimeError):
+logger = logging.getLogger("llm_service")
+
+class OpenAIConfigError(RuntimeError):
     pass
 
 
-class GeminiService:
-    def __init__(self, api_key: str = GEMINI_API_KEY, model: str = GEMINI_MODEL):
+class OpenAIService:
+    def __init__(self, api_key: str = OPENAI_API_KEY, model: str = OPENAI_MODEL):
         self.api_key = api_key
         self.model = model
-        self._client: genai.Client | None = None
+        self._client: OpenAI | None = None
 
     def is_enabled(self) -> bool:
         return bool(self.api_key)
 
     def _require_api_key(self) -> None:
         if not self.api_key:
-            raise GeminiConfigError("GEMINI_API_KEY chưa được cấu hình.")
+            raise OpenAIConfigError("OPENAI_API_KEY chưa được cấu hình.")
 
-    def _client_instance(self) -> genai.Client:
+    def _client_instance(self) -> OpenAI:
         self._require_api_key()
         if self._client is None:
-            self._client = genai.Client(api_key=self.api_key)
+            self._client = OpenAI(api_key=self.api_key)
         return self._client
 
     def _extract_json_text(self, text: str) -> str:
@@ -51,20 +52,26 @@ class GeminiService:
 
     def _generate_json(self, prompt: str, schema: dict[str, Any]) -> dict[str, Any]:
         try:
-            response = self._client_instance().models.generate_content(
+            response = self._client_instance().chat.completions.create(
                 model=self.model,
-                contents=prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "response_json_schema": schema,
+                messages=[
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "customer_message_parse",
+                        "schema": schema,
+                        "strict": True,
+                    },
                 },
             )
 
-            text = (response.text or "").strip()
+            text = (response.choices[0].message.content or "").strip()
             if not text:
-                raise ValueError("Gemini không trả về nội dung JSON.")
+                raise ValueError("OpenAI không trả về nội dung JSON.")
 
-            logger.info("Gemini response: %s", text)
+            logger.info("OpenAI response: %s", text)
             return json.loads(text)
         except Exception:
             logger.exception("Structured JSON parse failed, trying text fallback.")
@@ -72,27 +79,31 @@ class GeminiService:
                 prompt
                 + "\n\nQuan trọng: chỉ trả về đúng một JSON object hợp lệ, không giải thích thêm, không markdown."
             )
-            fallback_response = self._client_instance().models.generate_content(
+            fallback_response = self._client_instance().chat.completions.create(
                 model=self.model,
-                contents=fallback_prompt,
+                messages=[
+                    {"role": "user", "content": fallback_prompt},
+                ],
             )
-            fallback_text = (fallback_response.text or "").strip()
+            fallback_text = (fallback_response.choices[0].message.content or "").strip()
             if not fallback_text:
-                raise ValueError("Gemini không trả về nội dung JSON ở bước fallback.")
+                raise ValueError("OpenAI không trả về nội dung JSON ở bước fallback.")
 
-            logger.info("Gemini fallback response: %s", fallback_text)
+            logger.info("OpenAI fallback response: %s", fallback_text)
             return json.loads(self._extract_json_text(fallback_text))
 
     def _generate_text(self, prompt: str) -> str:
-        response = self._client_instance().models.generate_content(
+        response = self._client_instance().chat.completions.create(
             model=self.model,
-            contents=prompt,
+            messages=[
+                {"role": "user", "content": prompt},
+            ],
         )
-        text = (response.text or "").strip()
+        text = (response.choices[0].message.content or "").strip()
         if not text:
-            raise ValueError("Gemini không trả về nội dung.")
+            raise ValueError("OpenAI không trả về nội dung.")
         
-        logger.info("Gemini response: %s", text)
+        logger.info("OpenAI response: %s", text)
 
         return text
 
@@ -235,6 +246,7 @@ Quy tắc:
 - Chỉ dùng `shared_toppings` khi người dùng nói rõ topping áp dụng cho tất cả món trong câu.
 - Trả về danh sách tên topping canonical trong menu khi có thể.
 - Với `update_item`, chỉ dùng khi khách muốn sửa món đã có trong giỏ. Ưu tiên `cart_item_index` nếu khách nói "món số 2".
+- `cart_item_index` là số thứ tự 1-based đúng như đang hiển thị trong giỏ hàng. Không dùng zero-based và không được lệch số thứ tự.
 - `size` là size hiện tại để nhận diện món nếu có, `new_size` là size mới khách muốn đổi sang.
 - `quantity` là số lượng mới của dòng món sau khi cập nhật.
 - `sugar_level` và `ice_level` là mức mới khách muốn đổi cho dòng món.
@@ -335,7 +347,10 @@ Giỏ hàng hiện tại:
 Lịch sử hội thoại gần đây:
 {conversation_history or "Chưa có lịch sử hội thoại gần đây."}
 
-Tin nhắn khách:
+        Tin nhắn khách:
 {user_message}
 """
         return self._generate_text(prompt)
+
+
+GeminiService = OpenAIService

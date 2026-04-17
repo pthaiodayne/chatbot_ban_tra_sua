@@ -9,14 +9,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from app.gemini_service import GeminiService
+from app.llm_service import GeminiService
 from app.menu_service import MenuService
 from app.logging_config import setup_logging
 
 setup_logging()
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Test local Gemini parsing/reply for the milk tea bot.")
+    parser = argparse.ArgumentParser(description="Test local AI parsing/reply for the milk tea bot.")
     parser.add_argument(
         "--message",
         help="Tin nhắn khách hàng muốn test. Nếu bỏ trống, script sẽ hỏi nhập tương tác.",
@@ -40,7 +40,7 @@ def run_gemini_check(*, message: str, mode: str = "both", cart: str = "Giỏ hà
     gemini_service = GeminiService()
 
     if not gemini_service.is_enabled():
-        raise SystemExit("Thiếu GEMINI_API_KEY trong file .env.")
+        raise SystemExit("Thiếu OPENAI_API_KEY trong file .env.")
 
     if not message:
         raise SystemExit("Tin nhắn test không được để trống.")

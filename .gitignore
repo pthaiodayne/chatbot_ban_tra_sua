@@ -3,3 +3,4 @@
 *.db
 __pycache__
 /gemini_logs
+/llm_logs
