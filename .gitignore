@@ -2,5 +2,8 @@
 .env
 *.db
 __pycache__
+*.pyc
+*.pyo
+.pytest_cache
 /gemini_logs
 /llm_logs

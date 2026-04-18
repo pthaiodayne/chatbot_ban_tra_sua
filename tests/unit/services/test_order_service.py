@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-import unittest
-
-from sqlalchemy import create_engine
-from sqlalchemy.pool import StaticPool
-from sqlalchemy.orm import sessionmaker
-
-from app.models import Base
 from app.order_service import (
     add_item_to_order,
     get_or_create_draft_order,
@@ -14,24 +7,10 @@ from app.order_service import (
     update_order_item,
     update_toppings_for_order_item,
 )
+from tests.unit.base import DatabaseTestCase
 
 
-class OrderPricingTestCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self.engine = create_engine(
-            "sqlite://",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
-        Base.metadata.create_all(bind=self.engine)
-        self.db = self.SessionLocal()
-
-    def tearDown(self) -> None:
-        self.db.close()
-        Base.metadata.drop_all(bind=self.engine)
-        self.engine.dispose()
-
+class OrderServiceTestCase(DatabaseTestCase):
     def test_first_item_updates_subtotal_and_total(self) -> None:
         order = get_or_create_draft_order(self.db, "test-user-1")
 
@@ -386,4 +365,6 @@ class OrderPricingTestCase(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    import unittest
+
     unittest.main()

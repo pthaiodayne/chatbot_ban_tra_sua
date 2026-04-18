@@ -11,7 +11,7 @@ from app.chat_service import get_recent_chat_messages, render_chat_history, save
 from app.customer_service import get_or_create_customer_profile, update_customer_profile
 from app.database import Base, SessionLocal, engine
 from app.logging_config import setup_logging
-from app.llm_service import GeminiService
+from app.llm_service import LLMService
 from app.menu_service import MenuService
 from app.models import Order
 from app.order_service import (
@@ -27,7 +27,7 @@ from app.telegram_service import TelegramConfigError, send_message, set_webhook
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 menu_service = MenuService(str(BASE_DIR / "data" / "Menu.csv"))
-gemini_service = GeminiService()
+llm_service = LLMService()
 setup_logging()
 
 app = FastAPI(title="Milk Tea Bot")
@@ -164,7 +164,7 @@ def build_natural_action_reply(
     fallback_reply: str,
 ) -> str:
     try:
-        return gemini_service.generate_action_reply(
+        return llm_service.generate_action_reply(
             user_message=user_message,
             suggested_reply=suggested_reply or "",
             system_result=system_result,
@@ -334,12 +334,12 @@ async def telegram_webhook(request: Request) -> dict:
                 db,
                 chat_id,
                 telegram_user_id,
-                "Chào bạn 👋\n"
+                "Chào bạn \n"
                 "Các lệnh hiện có:\n"
                 "/menu - xem menu đồ uống\n"
                 "/toppings - xem topping\n"
-                "/add <tên món>|<size>|<số lượng>|<topping1,topping2>\n"
-                "Ví dụ: /add Trà Sữa Truyền Thống|L|2|Kem Tươi,Trân Châu Đen\n"
+                "/add <tên món> - <size> - <số lượng> - <topping1,topping2>\n"
+                "Ví dụ: /add Trà Sữa Truyền Thống - L - 2 - Kem Tươi,Trân Châu Đen\n"
                 "/cart - xem giỏ hàng\n"
                 "/name <tên khách>\n"
                 "/phone <số điện thoại của bạn>\n"
@@ -405,13 +405,13 @@ async def telegram_webhook(request: Request) -> dict:
 
         elif text.startswith("/add"):
             payload = text.replace("/add", "", 1).strip()
-            parts = [p.strip() for p in payload.split("|")]
+            parts = [p.strip() for p in payload.split(" - ")]
             if len(parts) < 3:
                 send_bot_message(
                     db,
                     chat_id,
                     telegram_user_id,
-                    "Cú pháp đúng:\n/add <tên món>|<size>|<số lượng>|<topping1,topping2>",
+                    "Cú pháp đúng:\n/add <tên món> - <size> - <số lượng> - <topping1,topping2>",
                 )
                 return {"ok": True}
 
@@ -584,7 +584,7 @@ async def telegram_webhook(request: Request) -> dict:
                 db,
                 chat_id,
                 telegram_user_id,
-                compose_reply(reply_text, "Thanh toán thành công.", summary_text),
+                compose_reply(reply_text, "Thanh toán thành công.", summary_text, "Tiệm Trà Sữa Của Mẹ cảm ơn bạn đã đặt hàng!\n\n Nhấn /start để bắt đầu đơn hàng mới."),
             )
 
         elif text == "/summary":
@@ -642,11 +642,11 @@ async def telegram_webhook(request: Request) -> dict:
                     db,
                     chat_id,
                     telegram_user_id,
-                    compose_reply(reply_text, "Thanh toán thành công.", summary_text),
+                    compose_reply(reply_text, "Thanh toán thành công.", summary_text, "Tiệm Trà Sữa Của Mẹ cảm ơn bạn đã đặt hàng!\n\n Nhấn /start để bắt đầu đơn hàng mới."),
                 )
                 return {"ok": True}
 
-            if not gemini_service.is_enabled():
+            if not llm_service.is_enabled():
                 send_bot_message(
                     db,
                     chat_id,
@@ -659,7 +659,7 @@ async def telegram_webhook(request: Request) -> dict:
                 return {"ok": True}
 
             try:
-                ai_result = gemini_service.parse_customer_message(
+                ai_result = llm_service.parse_customer_message(
                     user_message=text,
                     menu_text=menu_text,
                     toppings_text=toppings_text,
@@ -667,7 +667,7 @@ async def telegram_webhook(request: Request) -> dict:
                     conversation_history=conversation_history,
                 )
             except Exception:
-                logger.exception("Failed to parse customer message with Gemini.")
+                logger.exception("Failed to parse customer message with LLM.")
                 if looks_like_actionable_message(text):
                     send_bot_message(
                         db,
@@ -679,7 +679,7 @@ async def telegram_webhook(request: Request) -> dict:
                     )
                     return {"ok": True}
 
-                ai_reply = gemini_service.generate_customer_reply(
+                ai_reply = llm_service.generate_customer_reply(
                     user_message=text,
                     menu_text=menu_text,
                     toppings_text=toppings_text,
@@ -1376,7 +1376,7 @@ async def telegram_webhook(request: Request) -> dict:
                         )
                         return {"ok": True}
 
-                reply = ai_result.get("reply") or gemini_service.generate_customer_reply(
+                reply = ai_result.get("reply") or llm_service.generate_customer_reply(
                     user_message=text,
                     menu_text=menu_service.get_menu_text(),
                     toppings_text=menu_service.get_toppings_text(),

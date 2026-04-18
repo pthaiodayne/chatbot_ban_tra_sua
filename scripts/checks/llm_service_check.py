@@ -5,18 +5,19 @@ import json
 import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parents[2]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from app.llm_service import GeminiService
-from app.menu_service import MenuService
+from app.llm_service import LLMService
 from app.logging_config import setup_logging
+from app.menu_service import MenuService
 
 setup_logging()
 
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Test local AI parsing/reply for the milk tea bot.")
+    parser = argparse.ArgumentParser(description="Run a local LLM service check for the milk tea bot.")
     parser.add_argument(
         "--message",
         help="Tin nhắn khách hàng muốn test. Nếu bỏ trống, script sẽ hỏi nhập tương tác.",
@@ -35,11 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_gemini_check(*, message: str, mode: str = "both", cart: str = "Giỏ hàng đang trống.") -> None:
+def run_llm_check(*, message: str, mode: str = "both", cart: str = "Giỏ hàng đang trống.") -> None:
     menu_service = MenuService(str(BASE_DIR / "data" / "Menu.csv"))
-    gemini_service = GeminiService()
+    llm_service = LLMService()
 
-    if not gemini_service.is_enabled():
+    if not llm_service.is_enabled():
         raise SystemExit("Thiếu OPENAI_API_KEY trong file .env.")
 
     if not message:
@@ -50,7 +51,7 @@ def run_gemini_check(*, message: str, mode: str = "both", cart: str = "Giỏ hà
     cart_text = cart
 
     if mode in {"parse", "both"}:
-        parsed = gemini_service.parse_customer_message(
+        parsed = llm_service.parse_customer_message(
             user_message=message,
             menu_text=menu_text,
             toppings_text=toppings_text,
@@ -60,7 +61,7 @@ def run_gemini_check(*, message: str, mode: str = "both", cart: str = "Giỏ hà
         print(json.dumps(parsed, ensure_ascii=False, indent=2))
 
     if mode in {"reply", "both"}:
-        reply = gemini_service.generate_customer_reply(
+        reply = llm_service.generate_customer_reply(
             user_message=message,
             menu_text=menu_text,
             toppings_text=toppings_text,
@@ -75,7 +76,7 @@ def main() -> None:
     args = parser.parse_args()
 
     message = args.message or input("Nhập tin nhắn khách hàng: ").strip()
-    run_gemini_check(message=message, mode=args.mode, cart=args.cart)
+    run_llm_check(message=message, mode=args.mode, cart=args.cart)
 
 
 if __name__ == "__main__":

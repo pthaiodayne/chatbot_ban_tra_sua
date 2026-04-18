@@ -15,7 +15,7 @@ class OpenAIConfigError(RuntimeError):
     pass
 
 
-class OpenAIService:
+class LLMService:
     def __init__(self, api_key: str = OPENAI_API_KEY, model: str = OPENAI_MODEL):
         self.api_key = api_key
         self.model = model
@@ -351,6 +351,3 @@ Lịch sử hội thoại gần đây:
 {user_message}
 """
         return self._generate_text(prompt)
-
-
-GeminiService = OpenAIService

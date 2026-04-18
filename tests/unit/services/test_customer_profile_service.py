@@ -1,32 +1,11 @@
 from __future__ import annotations
 
-import unittest
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
-
 from app.customer_service import get_or_create_customer_profile, update_customer_profile
-from app.models import Base
 from app.order_service import get_or_create_active_order
+from tests.unit.base import DatabaseTestCase
 
 
-class CustomerProfileTestCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self.engine = create_engine(
-            "sqlite://",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
-        Base.metadata.create_all(bind=self.engine)
-        self.db = self.SessionLocal()
-
-    def tearDown(self) -> None:
-        self.db.close()
-        Base.metadata.drop_all(bind=self.engine)
-        self.engine.dispose()
-
+class CustomerProfileTestCase(DatabaseTestCase):
     def test_new_order_prefills_customer_info_from_profile(self) -> None:
         profile = get_or_create_customer_profile(self.db, "tele-1")
         update_customer_profile(
@@ -64,4 +43,6 @@ class CustomerProfileTestCase(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    import unittest
+
     unittest.main()

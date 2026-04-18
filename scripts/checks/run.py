@@ -5,35 +5,35 @@ import sys
 import unittest
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parents[2]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from scripts.test_gemini import run_gemini_check
+from scripts.checks.llm_service_check import run_llm_check
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run project checks.")
+    parser = argparse.ArgumentParser(description="Run local project checks.")
     parser.add_argument(
         "--suite",
-        choices=["unit", "gemini", "all"],
+        choices=["unit", "llm", "all"],
         default="unit",
         help="Chọn nhóm check muốn chạy.",
     )
     parser.add_argument(
         "--message",
-        help="Tin nhắn để test AI parse/reply. Bắt buộc khi chạy --suite gemini hoặc all.",
+        help="Tin nhắn để test LLM parse/reply. Bắt buộc khi chạy --suite llm hoặc all.",
     )
     parser.add_argument(
-        "--gemini-mode",
+        "--llm-mode",
         choices=["parse", "reply", "both"],
         default="both",
-        help="Chế độ test AI parse/reply.",
+        help="Chế độ test LLM parse/reply.",
     )
     parser.add_argument(
         "--cart",
         default="Giỏ hàng đang trống.",
-        help="Giỏ hàng giả lập khi test AI.",
+        help="Giỏ hàng giả lập khi test LLM.",
     )
     return parser
 
@@ -53,11 +53,11 @@ def main() -> None:
         print("=== RUNNING UNIT TESTS ===")
         success = run_unit_tests() and success
 
-    if args.suite in {"gemini", "all"}:
+    if args.suite in {"llm", "all"}:
         if not args.message:
-            raise SystemExit("Cần truyền --message khi chạy suite Gemini.")
-        print("\n=== RUNNING AI CHECK ===")
-        run_gemini_check(message=args.message, mode=args.gemini_mode, cart=args.cart)
+            raise SystemExit("Cần truyền --message khi chạy suite LLM.")
+        print("\n=== RUNNING LLM CHECK ===")
+        run_llm_check(message=args.message, mode=args.llm_mode, cart=args.cart)
 
     if not success:
         raise SystemExit(1)
