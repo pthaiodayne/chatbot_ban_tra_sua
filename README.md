@@ -64,5 +64,4 @@ Menu hôm nay có gì?
 
 ## Thông báo cho người bán
 - Cấu hình `SELLER_CHAT_ID` trong `.env`
-- Khi khách `/checkout`, bot sẽ gửi đơn đã chốt tạm thời sang chat của người bán
 - Khi khách `/confirm_pay`, bot sẽ gửi thêm thông báo đơn đã thanh toán
