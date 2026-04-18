@@ -6,13 +6,13 @@ import re
 
 from fastapi import FastAPI, Request
 
-from app.config import BASE_URL
+from app.config import BASE_URL, SELLER_CHAT_ID
 from app.chat_service import get_recent_chat_messages, render_chat_history, save_chat_message
 from app.customer_service import get_or_create_customer_profile, update_customer_profile
 from app.database import Base, SessionLocal, engine
 from app.logging_config import setup_logging
 from app.llm_service import LLMService
-from app.menu_service import MenuService
+from app.menu_service import MenuService, normalize_text
 from app.models import Order
 from app.order_service import (
     add_item_to_order,
@@ -74,8 +74,6 @@ PAYMENT_CONFIRM_KEYWORDS = (
     "xac nhan tra tien",
     "đồng ý thanh toán",
     "dong y thanh toan",
-    "ok thanh toán",
-    "ok thanh toan",
 )
 
 PAYMENT_REQUEST_KEYWORDS = (
@@ -85,6 +83,8 @@ PAYMENT_REQUEST_KEYWORDS = (
     "tra tien",
     "chuyển khoản",
     "chuyen khoan",
+    "ok thanh toán",
+    "ok thanh toan",
     "/pay",
 )
 
@@ -134,6 +134,88 @@ def extract_explicit_item_index(text: str) -> int | None:
     return None
 
 
+def infer_add_items_from_text(text: str) -> list[dict]:
+    normalized = normalize_text(text)
+    normalized = re.sub(r"\s*\+\s*", ", ", normalized)
+    normalized = re.sub(r"\s+va\s+", ", ", normalized)
+    segments = [segment.strip() for segment in normalized.split(",") if segment.strip()]
+    if len(segments) < 2:
+        return []
+
+    # Pattern: "2 macchiato, 1 ly size M, 1 ly size L"
+    first_match = re.fullmatch(r"(\d+)\s+(.+)", segments[0])
+    if first_match:
+        total_quantity = int(first_match.group(1))
+        item_query = first_match.group(2).strip()
+        candidate_names = menu_service.find_matching_item_names(item_query)
+        if len(candidate_names) == 1:
+            parsed_items: list[dict] = []
+            distributed_quantity = 0
+            split_size_pattern_ok = True
+            for segment in segments[1:]:
+                size_match = re.fullmatch(r"(\d+)\s*(?:ly\s*)?(?:size\s*)?([ml])", segment)
+                if not size_match:
+                    split_size_pattern_ok = False
+                    break
+                quantity = int(size_match.group(1))
+                size = size_match.group(2).upper()
+                distributed_quantity += quantity
+                parsed_items.append(
+                    {
+                        "item_name": candidate_names[0],
+                        "size": size,
+                        "quantity": quantity,
+                        "toppings": [],
+                    }
+                )
+            if split_size_pattern_ok and distributed_quantity == total_quantity:
+                return parsed_items
+
+    # Pattern: "1 cf đen, 2 macchiato size l"
+    parsed_items: list[dict] = []
+    for segment in segments:
+        match = re.fullmatch(r"(\d+)\s+(.+?)(?:\s+(?:size\s*)?([ml]))?", segment)
+        if not match:
+            return []
+
+        quantity = int(match.group(1))
+        item_query = match.group(2).strip()
+        size = (match.group(3) or "M").upper()
+
+        candidate_names = menu_service.find_matching_item_names(item_query)
+        if len(candidate_names) != 1:
+            return []
+
+        parsed_items.append(
+            {
+                "item_name": candidate_names[0],
+                "size": size,
+                "quantity": quantity,
+                "toppings": [],
+            }
+        )
+
+    return parsed_items
+
+
+def should_fallback_to_local_add_parser(parsed_items: list[dict]) -> bool:
+    if not parsed_items:
+        return True
+
+    usable_items = 0
+    for parsed_item in parsed_items:
+        item_name = (parsed_item.get("item_name") or "").strip()
+        size = (parsed_item.get("size") or "").strip()
+        quantity = parsed_item.get("quantity")
+        if not item_name or not size:
+            continue
+        if not isinstance(quantity, int) or quantity <= 0:
+            continue
+        usable_items += 1
+
+    return usable_items == 0
+
+
 def compose_reply(
     primary_reply: str | None,
     fallback_reply: str,
@@ -177,11 +259,81 @@ def build_natural_action_reply(
         return (suggested_reply or "").strip() or fallback_reply
 
 
+def build_response_context(order: Order) -> dict[str, str]:
+    return {
+        "menu_text": menu_service.get_menu_text(),
+        "toppings_text": menu_service.get_toppings_text(),
+        "cart_text": render_cart(order),
+    }
+
+
+def render_natural_reply(
+    *,
+    user_message: str,
+    suggested_reply: str | None,
+    system_result: str,
+    conversation_history: str,
+    fallback_reply: str,
+    order: Order,
+    cart_override: str | None = None,
+) -> str:
+    context = build_response_context(order)
+    cart_text = cart_override if cart_override is not None else context["cart_text"]
+    return build_natural_action_reply(
+        user_message=user_message,
+        suggested_reply=suggested_reply,
+        system_result=system_result,
+        menu_text=context["menu_text"],
+        toppings_text=context["toppings_text"],
+        cart_text=cart_text,
+        conversation_history=conversation_history,
+        fallback_reply=fallback_reply,
+    )
+
+
+def send_natural_response(
+    db,
+    *,
+    chat_id: int,
+    telegram_user_id: str,
+    user_message: str,
+    suggested_reply: str | None,
+    system_result: str,
+    conversation_history: str,
+    fallback_reply: str,
+    order: Order,
+    sections: tuple[str | None, ...] = (),
+    cart_override: str | None = None,
+) -> None:
+    reply_text = render_natural_reply(
+        user_message=user_message,
+        suggested_reply=suggested_reply,
+        system_result=system_result,
+        conversation_history=conversation_history,
+        fallback_reply=fallback_reply,
+        order=order,
+        cart_override=cart_override,
+    )
+    send_bot_message(
+        db,
+        chat_id,
+        telegram_user_id,
+        compose_reply(reply_text, fallback_reply, *sections),
+    )
+
+
 def mark_order_paid(db, order: Order) -> None:
     order.payment_status = "paid"
     order.order_status = "paid"
     db.commit()
     db.refresh(order)
+
+
+def mark_order_confirmed(db, order: Order) -> None:
+    if order.order_status == "draft":
+        order.order_status = "confirmed"
+        db.commit()
+        db.refresh(order)
 
 
 def has_complete_customer_info(order: Order) -> bool:
@@ -190,11 +342,44 @@ def has_complete_customer_info(order: Order) -> bool:
 
 def render_payment_confirmation(order: Order) -> str:
     return (
-        "Mình lấy thông tin đặt hàng hiện tại từ hồ sơ của bạn trong hệ thống như sau:\n\n"
+        "Xác nhận lại thông tin trước khi thanh toán:\n\n"
         f"{render_order_summary(order)}\n\n"
         "Nếu đúng, nhắn /confirm_pay hoặc 'xác nhận thanh toán'.\n"
-        "Nếu cần sửa, bạn chỉ cần nhắn lại tên, số điện thoại của bạn hoặc địa chỉ mới."
+        "Nếu cần sửa, bạn chỉ cần nhắn lại tên, số điện thoại hoặc địa chỉ."
     )
+
+
+def process_demo_checkout(db, order: Order) -> str | None:
+    if not order.id or not order.items or order.payment_status == "paid":
+        return None
+
+    mark_order_confirmed(db, order)
+    return render_order_summary(order)
+
+
+def process_demo_payment_request(db, order: Order) -> str | None:
+    if not order.id or not order.items or order.payment_status == "paid":
+        return None
+
+    mark_order_confirmed(db, order)
+    if not has_complete_customer_info(order):
+        return None
+
+    order.order_status = "awaiting_payment_confirmation"
+    db.commit()
+    db.refresh(order)
+    return render_payment_confirmation(order)
+
+
+def process_demo_payment_confirmation(db, order: Order) -> str | None:
+    if not order.id or not order.items or order.payment_status == "paid":
+        return None
+
+    if order.order_status != "awaiting_payment_confirmation":
+        return None
+
+    mark_order_paid(db, order)
+    return render_order_summary(order)
 
 
 def maybe_advance_order_after_customer_info(
@@ -204,29 +389,24 @@ def maybe_advance_order_after_customer_info(
     user_message: str,
     conversation_history: str,
 ) -> str | None:
-    if not order.items or order.payment_status == "paid" or not has_complete_customer_info(order):
+    if not order.items or order.payment_status == "paid":
         return None
 
-    normalized_context = f"{conversation_history}\n{user_message}".lower()
-    wants_payment = looks_like_payment_request(normalized_context)
-    wants_checkout = looks_like_checkout_request(normalized_context) or wants_payment
+    wants_payment = looks_like_payment_request(user_message)
+    wants_checkout = looks_like_checkout_request(user_message) or wants_payment
 
     if not wants_checkout:
         return None
 
-    if order.order_status == "draft":
-        order.order_status = "confirmed"
+    if wants_payment:
+        confirmation_text = process_demo_payment_request(db, order)
+        if confirmation_text:
+            return confirmation_text
+        if has_complete_customer_info(order):
+            return None
+        return "Mình cần tên, số điện thoại và địa chỉ trước khi thanh toán."
 
-    if wants_payment and order.order_status == "confirmed":
-        order.order_status = "awaiting_payment_confirmation"
-
-    db.commit()
-    db.refresh(order)
-
-    if order.order_status == "awaiting_payment_confirmation":
-        return render_payment_confirmation(order)
-
-    return render_order_summary(order)
+    return process_demo_checkout(db, order)
 
 
 def sync_customer_info(
@@ -260,6 +440,229 @@ def sync_customer_info(
 def send_bot_message(db, chat_id: int, telegram_user_id: str, text: str) -> None:
     send_message(chat_id, text)
     save_chat_message(db, telegram_user_id, "assistant", text)
+
+
+def build_seller_notification(order: Order, status_label: str) -> str:
+    return (
+        f"Thông báo có đơn hàng mới!!\n"
+        f"Trạng thái: {status_label}\n\n"
+        f"{render_order_summary(order)}"
+    )
+
+
+def notify_seller(order: Order, status_label: str) -> None:
+    if not SELLER_CHAT_ID:
+        return
+
+    try:
+        seller_chat_id = int(SELLER_CHAT_ID)
+    except ValueError:
+        logger.warning("SELLER_CHAT_ID is not a valid integer.")
+        return
+
+    try:
+        send_message(seller_chat_id, build_seller_notification(order, status_label))
+    except Exception:
+        logger.exception("Failed to notify seller for order %s.", order.id)
+
+
+def handle_checkout_flow(
+    db,
+    *,
+    chat_id: int,
+    telegram_user_id: str,
+    user_message: str,
+    conversation_history: str,
+    order: Order,
+    suggested_reply: str | None = None,
+) -> bool:
+    summary_text = process_demo_checkout(db, order)
+    if not summary_text:
+        send_natural_response(
+            db,
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            user_message=user_message,
+            suggested_reply=suggested_reply,
+            system_result="Hệ thống không thể chốt đơn vì giỏ hàng đang trống.",
+            conversation_history=conversation_history,
+            fallback_reply="Giỏ hàng đang trống hoặc đơn hàng đã được thanh toán.",
+            order=order,
+        )
+        return True
+
+    send_natural_response(
+        db,
+        chat_id=chat_id,
+        telegram_user_id=telegram_user_id,
+        user_message=user_message,
+        suggested_reply=suggested_reply,
+        system_result="Hệ thống đã chốt đơn tạm thời thành công.",
+        conversation_history=conversation_history,
+        fallback_reply="Mình đã chốt đơn tạm thời cho bạn.",
+        order=order,
+        sections=(
+            summary_text,
+            "Bạn có thể dùng /pay để kiểm tra lại thông tin trước khi thanh toán.",
+        ),
+        cart_override=summary_text,
+    )
+    return True
+
+
+def handle_payment_request_flow(
+    db,
+    *,
+    chat_id: int,
+    telegram_user_id: str,
+    user_message: str,
+    conversation_history: str,
+    order: Order,
+    suggested_reply: str | None = None,
+) -> bool:
+    confirmation_text = process_demo_payment_request(db, order)
+    if not confirmation_text:
+        if not order.id or not order.items or order.payment_status == "paid":
+            send_natural_response(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                user_message=user_message,
+                suggested_reply=suggested_reply,
+                system_result="Hệ thống không thể chuyển sang bước thanh toán vì giỏ hàng đang trống hoặc đơn hàng đã được thanh toán.",
+                conversation_history=conversation_history,
+                fallback_reply="Giỏ hàng đang trống hoặc đơn hàng đã được thanh toán.",
+                order=order,
+            )
+            return True
+
+        send_natural_response(
+            db,
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            user_message=user_message,
+            suggested_reply=suggested_reply,
+            system_result="Hệ thống chưa thể vào bước xác nhận thanh toán vì thiếu tên, số điện thoại hoặc địa chỉ.",
+            conversation_history=conversation_history,
+            fallback_reply="Mình cần tên, số điện thoại và địa chỉ trước khi thanh toán.",
+            order=order,
+        )
+        return True
+
+    send_natural_response(
+        db,
+        chat_id=chat_id,
+        telegram_user_id=telegram_user_id,
+        user_message=user_message,
+        suggested_reply=suggested_reply,
+        system_result="Hệ thống đã hiển thị thông tin để khách xác nhận trước khi thanh toán.",
+        conversation_history=conversation_history,
+        fallback_reply="Mình gửi lại thông tin để bạn xác nhận trước khi thanh toán.",
+        order=order,
+        sections=(confirmation_text,),
+        cart_override=confirmation_text,
+    )
+    return True
+
+
+def handle_payment_confirmation_flow(
+    db,
+    *,
+    chat_id: int,
+    telegram_user_id: str,
+    user_message: str,
+    conversation_history: str,
+    order: Order,
+    suggested_reply: str | None = None,
+) -> bool:
+    summary_text = process_demo_payment_confirmation(db, order)
+    if not summary_text:
+        if not order.id or not order.items or order.payment_status == "paid":
+            send_natural_response(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                user_message=user_message,
+                suggested_reply=suggested_reply,
+                system_result="Hệ thống không có đơn hợp lệ để xác nhận thanh toán.",
+                conversation_history=conversation_history,
+                fallback_reply="Giỏ hàng đang trống hoặc đơn hàng đã được thanh toán.",
+                order=order,
+            )
+            return True
+
+        if has_complete_customer_info(order):
+            confirmation_text = process_demo_payment_request(db, order)
+            if confirmation_text:
+                send_natural_response(
+                    db,
+                    chat_id=chat_id,
+                    telegram_user_id=telegram_user_id,
+                    user_message=user_message,
+                    suggested_reply=suggested_reply,
+                    system_result="Hệ thống chưa có bước xác nhận chờ sẵn nên đã mở lại màn hình xác nhận thanh toán cho khách.",
+                    conversation_history=conversation_history,
+                    fallback_reply="Mình gửi lại thông tin để bạn xác nhận trước khi thanh toán.",
+                    order=order,
+                    sections=(confirmation_text,),
+                    cart_override=confirmation_text,
+                )
+                return True
+
+        send_natural_response(
+            db,
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            user_message=user_message,
+            suggested_reply=suggested_reply,
+            system_result="Hệ thống chưa thể xác nhận thanh toán vì còn thiếu tên, số điện thoại hoặc địa chỉ.",
+            conversation_history=conversation_history,
+            fallback_reply="Mình cần tên, số điện thoại và địa chỉ trước khi thanh toán.",
+            order=order,
+        )
+        return True
+
+    send_natural_response(
+        db,
+        chat_id=chat_id,
+        telegram_user_id=telegram_user_id,
+        user_message=user_message,
+        suggested_reply=suggested_reply,
+        system_result="Hệ thống đã xác nhận thanh toán thành công cho đơn hàng.",
+        conversation_history=conversation_history,
+        fallback_reply="Thanh toán thành công.",
+        order=order,
+        sections=(
+            summary_text,
+            "Tiệm Trà Sữa Của Mẹ cảm ơn bạn đã đặt hàng!",
+            "Nhấn /start để bắt đầu đơn hàng mới.",
+        ),
+        cart_override=summary_text,
+    )
+    notify_seller(order, "paid")
+    return True
+
+
+def handle_customer_info_command(
+    db,
+    *,
+    chat_id: int,
+    telegram_user_id: str,
+    order: Order,
+    field: str,
+    value: str,
+) -> None:
+    sync_kwargs = {field: value}
+    sync_customer_info(db, telegram_user_id, order, **sync_kwargs)
+    reply_map = {
+        "name": "Đã lưu tên khách.",
+        "phone": "Đã lưu số điện thoại của bạn.",
+        "address": "Đã lưu địa chỉ.",
+    }
+    reply_text = reply_map[field]
+    if order.order_status == "awaiting_payment_confirmation":
+        reply_text += "\n\n" + render_payment_confirmation(order)
+    send_bot_message(db, chat_id, telegram_user_id, reply_text)
 
 
 @app.on_event("startup")
@@ -328,6 +731,7 @@ async def telegram_webhook(request: Request) -> dict:
     try:
         conversation_history = render_chat_history(get_recent_chat_messages(db, telegram_user_id))
         save_chat_message(db, telegram_user_id, "user", text)
+        order = None
 
         if text == "/start":
             send_bot_message(
@@ -346,7 +750,7 @@ async def telegram_webhook(request: Request) -> dict:
                 "/address <địa chỉ>\n"
                 "/note <ghi chú>\n"
                 "/checkout - chốt đơn\n"
-                "/pay - xem lại thông tin trước khi thanh toán\n"
+                "/pay - kiểm tra lại thông tin trước khi thanh toán\n"
                 "/confirm_pay - xác nhận thanh toán\n"
                 "/summary - xem tóm tắt đơn\n\n"
                 "Bạn cũng có thể nhắn tự nhiên, ví dụ:\n"
@@ -375,27 +779,36 @@ async def telegram_webhook(request: Request) -> dict:
 
         elif text.startswith("/name "):
             order = get_or_create_active_order(db, telegram_user_id)
-            sync_customer_info(db, telegram_user_id, order, name=text.replace("/name ", "", 1).strip())
-            reply_text = "Đã lưu tên khách."
-            if order.order_status == "awaiting_payment_confirmation":
-                reply_text += "\n\n" + render_payment_confirmation(order)
-            send_bot_message(db, chat_id, telegram_user_id, reply_text)
+            handle_customer_info_command(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                order=order,
+                field="name",
+                value=text.replace("/name ", "", 1).strip(),
+            )
 
         elif text.startswith("/phone "):
             order = get_or_create_active_order(db, telegram_user_id)
-            sync_customer_info(db, telegram_user_id, order, phone=text.replace("/phone ", "", 1).strip())
-            reply_text = "Đã lưu số điện thoại của bạn."
-            if order.order_status == "awaiting_payment_confirmation":
-                reply_text += "\n\n" + render_payment_confirmation(order)
-            send_bot_message(db, chat_id, telegram_user_id, reply_text)
+            handle_customer_info_command(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                order=order,
+                field="phone",
+                value=text.replace("/phone ", "", 1).strip(),
+            )
 
         elif text.startswith("/address "):
             order = get_or_create_active_order(db, telegram_user_id)
-            sync_customer_info(db, telegram_user_id, order, address=text.replace("/address ", "", 1).strip())
-            reply_text = "Đã lưu địa chỉ."
-            if order.order_status == "awaiting_payment_confirmation":
-                reply_text += "\n\n" + render_payment_confirmation(order)
-            send_bot_message(db, chat_id, telegram_user_id, reply_text)
+            handle_customer_info_command(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                order=order,
+                field="address",
+                value=text.replace("/address ", "", 1).strip(),
+            )
 
         elif text.startswith("/note "):
             order = get_or_create_active_order(db, telegram_user_id)
@@ -463,128 +876,35 @@ async def telegram_webhook(request: Request) -> dict:
 
         elif text == "/checkout":
             order = get_or_create_active_order(db, telegram_user_id)
-            if not order.id or order.payment_status == "paid":
-                send_bot_message(db, chat_id, telegram_user_id, "Giỏ hàng đang trống hoặc đơn hàng đã được thanh toán.")
-                return {"ok": True}
-
-            missing = []
-            if not order.customer_name:
-                missing.append("tên khách")
-            if not order.phone:
-                missing.append("số điện thoại")
-            if not order.address:
-                missing.append("địa chỉ")
-
-            if missing:
-                send_bot_message(
-                    db,
-                    chat_id,
-                    telegram_user_id,
-                    "Mình chưa đủ thông tin giao hàng để chốt đơn. Bạn còn thiếu: "
-                    + ", ".join(missing)
-                    + ".\nBạn có thể nhắn tự nhiên hoặc dùng /name, /phone, /address.",
-                )
-                return {"ok": True}
-
-            order.order_status = "confirmed"
-            db.commit()
-            db.refresh(order)
-            send_bot_message(
+            handle_checkout_flow(
                 db,
-                chat_id,
-                telegram_user_id,
-                "Mình đã chốt đơn tạm thời cho bạn.\n\n"
-                + render_order_summary(order)
-                + "\n\nDùng /pay để xem lại thông tin trong hệ thống trước khi xác nhận thanh toán.",
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                user_message=text,
+                conversation_history=conversation_history,
+                order=order,
             )
 
         elif text == "/pay":
             order = get_or_create_active_order(db, telegram_user_id)
-            if not order.id or order.payment_status == "paid":
-                send_bot_message(db, chat_id, telegram_user_id, "Giỏ hàng đang trống hoặc đơn hàng đã được thanh toán.")
-                return {"ok": True}
-
-            if order.order_status != "confirmed":
-                send_bot_message(db, chat_id, telegram_user_id, "Bạn cần /checkout trước khi thanh toán.")
-                return {"ok": True}
-
-            if not has_complete_customer_info(order):
-                send_bot_message(
-                    db,
-                    chat_id,
-                    telegram_user_id,
-                    "Mình chưa đủ thông tin để xác nhận thanh toán. Bạn vui lòng cập nhật tên, số điện thoại của bạn và địa chỉ giúp mình.",
-                )
-                return {"ok": True}
-
-            order.order_status = "awaiting_payment_confirmation"
-            db.commit()
-            db.refresh(order)
-            confirmation_text = render_payment_confirmation(order)
-            reply_text = build_natural_action_reply(
-                user_message=text,
-                suggested_reply="",
-                system_result="Hệ thống đã chuyển đơn sang bước chờ khách xác nhận thanh toán.",
-                menu_text=menu_service.get_menu_text(),
-                toppings_text=menu_service.get_toppings_text(),
-                cart_text=confirmation_text,
-                conversation_history=conversation_history,
-                fallback_reply="Mình lấy thông tin đặt hàng hiện tại từ hồ sơ của bạn trong hệ thống để bạn xác nhận lại trước khi thanh toán.",
-            )
-            send_bot_message(
+            handle_payment_request_flow(
                 db,
-                chat_id,
-                telegram_user_id,
-                compose_reply(reply_text, reply_text, confirmation_text),
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                user_message=text,
+                conversation_history=conversation_history,
+                order=order,
             )
 
         elif text == "/confirm_pay":
             order = get_or_create_active_order(db, telegram_user_id)
-            if not order.id or order.payment_status == "paid":
-                reply_text = build_natural_action_reply(
-                    user_message=text,
-                    suggested_reply="",
-                    system_result="Hệ thống không có đơn nào đang chờ thanh toán để xác nhận.",
-                    menu_text=menu_service.get_menu_text(),
-                    toppings_text=menu_service.get_toppings_text(),
-                    cart_text=render_cart(order),
-                    conversation_history=conversation_history,
-                    fallback_reply="Không có đơn nào đang chờ thanh toán.",
-                )
-                send_bot_message(db, chat_id, telegram_user_id, reply_text)
-                return {"ok": True}
-
-            if order.order_status != "awaiting_payment_confirmation":
-                reply_text = build_natural_action_reply(
-                    user_message=text,
-                    suggested_reply="",
-                    system_result="Hệ thống chưa ở bước xác nhận thanh toán vì khách chưa vào bước /pay.",
-                    menu_text=menu_service.get_menu_text(),
-                    toppings_text=menu_service.get_toppings_text(),
-                    cart_text=render_cart(order),
-                    conversation_history=conversation_history,
-                    fallback_reply="Bạn cần dùng /pay trước để xem lại thông tin và xác nhận thanh toán.",
-                )
-                send_bot_message(db, chat_id, telegram_user_id, reply_text)
-                return {"ok": True}
-
-            mark_order_paid(db, order)
-            summary_text = render_order_summary(order)
-            reply_text = build_natural_action_reply(
-                user_message=text,
-                suggested_reply="",
-                system_result="Hệ thống đã xác nhận thanh toán thành công cho đơn hàng.",
-                menu_text=menu_service.get_menu_text(),
-                toppings_text=menu_service.get_toppings_text(),
-                cart_text=summary_text,
-                conversation_history=conversation_history,
-                fallback_reply="Thanh toán thành công.",
-            )
-            send_bot_message(
+            handle_payment_confirmation_flow(
                 db,
-                chat_id,
-                telegram_user_id,
-                compose_reply(reply_text, "Thanh toán thành công.", summary_text, "Tiệm Trà Sữa Của Mẹ cảm ơn bạn đã đặt hàng!\n\n Nhấn /start để bắt đầu đơn hàng mới."),
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                user_message=text,
+                conversation_history=conversation_history,
+                order=order,
             )
 
         elif text == "/summary":
@@ -593,56 +913,19 @@ async def telegram_webhook(request: Request) -> dict:
 
         else:
             order = get_or_create_active_order(db, telegram_user_id)
-            menu_text = menu_service.get_menu_text()
-            toppings_text = menu_service.get_toppings_text()
-            cart_text = render_cart(order)
+            response_context = build_response_context(order)
+            menu_text = response_context["menu_text"]
+            toppings_text = response_context["toppings_text"]
+            cart_text = response_context["cart_text"]
 
             if is_payment_confirmation_message(text):
-                if not order.id or order.payment_status == "paid":
-                    reply_text = build_natural_action_reply(
-                        user_message=text,
-                        suggested_reply="",
-                        system_result="Hệ thống không có đơn nào đang chờ thanh toán để xác nhận.",
-                        menu_text=menu_text,
-                        toppings_text=toppings_text,
-                        cart_text=cart_text,
-                        conversation_history=conversation_history,
-                        fallback_reply="Không có đơn nào đang chờ thanh toán.",
-                    )
-                    send_bot_message(db, chat_id, telegram_user_id, reply_text)
-                    return {"ok": True}
-
-                if order.order_status != "awaiting_payment_confirmation":
-                    reply_text = build_natural_action_reply(
-                        user_message=text,
-                        suggested_reply="",
-                        system_result="Hệ thống chưa ở bước xác nhận thanh toán vì khách chưa vào bước /pay.",
-                        menu_text=menu_text,
-                        toppings_text=toppings_text,
-                        cart_text=cart_text,
-                        conversation_history=conversation_history,
-                        fallback_reply="Mình chưa ở bước xác nhận thanh toán. Bạn dùng /pay trước để mình hiển thị lại thông tin từ hệ thống nhé.",
-                    )
-                    send_bot_message(db, chat_id, telegram_user_id, reply_text)
-                    return {"ok": True}
-
-                mark_order_paid(db, order)
-                summary_text = render_order_summary(order)
-                reply_text = build_natural_action_reply(
-                    user_message=text,
-                    suggested_reply="",
-                    system_result="Hệ thống đã xác nhận thanh toán thành công cho đơn hàng.",
-                    menu_text=menu_text,
-                    toppings_text=toppings_text,
-                    cart_text=summary_text,
-                    conversation_history=conversation_history,
-                    fallback_reply="Thanh toán thành công.",
-                )
-                send_bot_message(
+                handle_payment_confirmation_flow(
                     db,
-                    chat_id,
-                    telegram_user_id,
-                    compose_reply(reply_text, "Thanh toán thành công.", summary_text, "Tiệm Trà Sữa Của Mẹ cảm ơn bạn đã đặt hàng!\n\n Nhấn /start để bắt đầu đơn hàng mới."),
+                    chat_id=chat_id,
+                    telegram_user_id=telegram_user_id,
+                    user_message=text,
+                    conversation_history=conversation_history,
+                    order=order,
                 )
                 return {"ok": True}
 
@@ -702,23 +985,24 @@ async def telegram_webhook(request: Request) -> dict:
                 add_item = ai_result.get("add_item") or {}
                 parsed_items = add_item.get("items") or []
                 shared_toppings = [str(x).strip() for x in (add_item.get("shared_toppings") or []) if str(x).strip()]
+                if should_fallback_to_local_add_parser(parsed_items):
+                    inferred_items = infer_add_items_from_text(text)
+                else:
+                    inferred_items = []
+                if inferred_items:
+                    parsed_items = inferred_items
 
                 if not parsed_items:
-                    reply_text = build_natural_action_reply(
+                    send_natural_response(
+                        db,
+                        chat_id=chat_id,
+                        telegram_user_id=telegram_user_id,
                         user_message=text,
                         suggested_reply=ai_result.get("reply"),
                         system_result="Hệ thống chưa tách được món nào hợp lệ từ tin nhắn của khách.",
-                        menu_text=menu_text,
-                        toppings_text=toppings_text,
-                        cart_text=cart_text,
                         conversation_history=conversation_history,
                         fallback_reply="Mình chưa tách được món cần thêm vào giỏ. Bạn nhắn rõ từng món và size giúp mình nhé.",
-                    )
-                    send_bot_message(
-                        db,
-                        chat_id,
-                        telegram_user_id,
-                        reply_text,
+                        order=order,
                     )
                     return {"ok": True}
 
@@ -736,37 +1020,32 @@ async def telegram_webhook(request: Request) -> dict:
 
                     item = menu_service.find_item(item_name, size) if item_name and size else None
                     if not item:
-                        reply_text = build_natural_action_reply(
+                        send_natural_response(
+                            db,
+                            chat_id=chat_id,
+                            telegram_user_id=telegram_user_id,
                             user_message=text,
                             suggested_reply=ai_result.get("reply"),
                             system_result=f"Hệ thống không tìm thấy món hoặc size hợp lệ cho mục '{item_name}' với size '{size}'.",
-                            menu_text=menu_text,
-                            toppings_text=toppings_text,
-                            cart_text=cart_text,
                             conversation_history=conversation_history,
                             fallback_reply="Mình chưa xác định được một trong các món hoặc size hợp lệ trong câu vừa rồi.",
-                        )
-                        send_bot_message(
-                            db,
-                            chat_id,
-                            telegram_user_id,
-                            reply_text,
+                            order=order,
                         )
                         return {"ok": True}
 
                     ok, invalid_toppings, matched_toppings = menu_service.are_valid_toppings(combined_toppings)
                     if not ok:
-                        reply_text = build_natural_action_reply(
+                        send_natural_response(
+                            db,
+                            chat_id=chat_id,
+                            telegram_user_id=telegram_user_id,
                             user_message=text,
                             suggested_reply=ai_result.get("reply"),
                             system_result=f"Hệ thống phát hiện topping không hợp lệ: {', '.join(invalid_toppings)}.",
-                            menu_text=menu_text,
-                            toppings_text=toppings_text,
-                            cart_text=cart_text,
                             conversation_history=conversation_history,
                             fallback_reply=f"Topping không hợp lệ: {', '.join(invalid_toppings)}",
+                            order=order,
                         )
-                        send_bot_message(db, chat_id, telegram_user_id, reply_text)
                         return {"ok": True}
 
                     prepared_items.append(
@@ -792,25 +1071,18 @@ async def telegram_webhook(request: Request) -> dict:
 
                 db.refresh(order)
                 updated_cart_text = render_cart(order)
-                reply_text = build_natural_action_reply(
+                send_natural_response(
+                    db,
+                    chat_id=chat_id,
+                    telegram_user_id=telegram_user_id,
                     user_message=text,
                     suggested_reply=ai_result.get("reply"),
                     system_result="Hệ thống đã thêm món vào giỏ hàng thành công.",
-                    menu_text=menu_text,
-                    toppings_text=toppings_text,
-                    cart_text=updated_cart_text,
                     conversation_history=conversation_history,
                     fallback_reply="Mình đã thêm món vào giỏ.",
-                )
-                send_bot_message(
-                    db,
-                    chat_id,
-                    telegram_user_id,
-                    compose_reply(
-                        reply_text,
-                        "Mình đã thêm món vào giỏ.",
-                        updated_cart_text,
-                    ),
+                    order=order,
+                    sections=(updated_cart_text,),
+                    cart_override=updated_cart_text,
                 )
 
             elif intent == "update_item":
@@ -1137,8 +1409,6 @@ async def telegram_webhook(request: Request) -> dict:
                 )
                 if follow_up_text:
                     reply_text += "\n\n" + follow_up_text
-                elif order.order_status == "awaiting_payment_confirmation":
-                    reply_text += "\n\n" + render_payment_confirmation(order)
                 send_bot_message(db, chat_id, telegram_user_id, reply_text)
 
             elif intent == "show_menu":
@@ -1189,137 +1459,25 @@ async def telegram_webhook(request: Request) -> dict:
                 )
 
             elif intent == "checkout":
-                if not order.items:
-                    reply_text = build_natural_action_reply(
-                        user_message=text,
-                        suggested_reply=ai_result.get("reply"),
-                        system_result="Hệ thống không thể chốt đơn vì giỏ hàng đang trống.",
-                        menu_text=menu_text,
-                        toppings_text=toppings_text,
-                        cart_text=cart_text,
-                        conversation_history=conversation_history,
-                        fallback_reply="Giỏ hàng đang trống.",
-                    )
-                    send_bot_message(db, chat_id, telegram_user_id, reply_text)
-                    return {"ok": True}
-
-                missing = []
-                if not order.customer_name:
-                    missing.append("tên khách")
-                if not order.phone:
-                    missing.append("số điện thoại")
-                if not order.address:
-                    missing.append("địa chỉ")
-
-                if missing:
-                    reply_text = build_natural_action_reply(
-                        user_message=text,
-                        suggested_reply=ai_result.get("reply"),
-                        system_result=f"Hệ thống chưa thể chốt đơn vì thiếu thông tin giao hàng: {', '.join(missing)}.",
-                        menu_text=menu_text,
-                        toppings_text=toppings_text,
-                        cart_text=cart_text,
-                        conversation_history=conversation_history,
-                        fallback_reply="Mình chưa đủ thông tin giao hàng để chốt đơn.",
-                    )
-                    send_bot_message(db, chat_id, telegram_user_id, reply_text)
-                    return {"ok": True}
-
-                order.order_status = "confirmed"
-                db.commit()
-                db.refresh(order)
-                summary_text = render_order_summary(order)
-                send_bot_message(
+                handle_checkout_flow(
                     db,
-                    chat_id,
-                    telegram_user_id,
-                    compose_reply(
-                        build_natural_action_reply(
-                            user_message=text,
-                            suggested_reply=ai_result.get("reply"),
-                            system_result="Hệ thống đã chốt đơn tạm thời thành công.",
-                            menu_text=menu_text,
-                            toppings_text=toppings_text,
-                            cart_text=summary_text,
-                            conversation_history=conversation_history,
-                            fallback_reply="Mình đã chốt đơn tạm thời cho bạn.",
-                        ),
-                        "Mình đã chốt đơn tạm thời cho bạn.",
-                        summary_text,
-                        "Dùng /pay để xem lại thông tin trong hệ thống trước khi xác nhận thanh toán.",
-                    ),
+                    chat_id=chat_id,
+                    telegram_user_id=telegram_user_id,
+                    user_message=text,
+                    conversation_history=conversation_history,
+                    order=order,
+                    suggested_reply=ai_result.get("reply"),
                 )
 
             elif intent == "pay":
-                if not order.items:
-                    reply_text = build_natural_action_reply(
-                        user_message=text,
-                        suggested_reply=ai_result.get("reply"),
-                        system_result="Hệ thống không thể chuyển sang bước thanh toán vì giỏ hàng đang trống.",
-                        menu_text=menu_text,
-                        toppings_text=toppings_text,
-                        cart_text=cart_text,
-                        conversation_history=conversation_history,
-                        fallback_reply="Giỏ hàng đang trống.",
-                    )
-                    send_bot_message(db, chat_id, telegram_user_id, reply_text)
-                    return {"ok": True}
-
-                if order.order_status == "draft" and has_complete_customer_info(order):
-                    order.order_status = "confirmed"
-                    db.commit()
-                    db.refresh(order)
-
-                if order.order_status != "confirmed":
-                    reply_text = build_natural_action_reply(
-                        user_message=text,
-                        suggested_reply=ai_result.get("reply"),
-                        system_result="Hệ thống chưa thể thanh toán vì đơn chưa được checkout/chốt đơn.",
-                        menu_text=menu_text,
-                        toppings_text=toppings_text,
-                        cart_text=cart_text,
-                        conversation_history=conversation_history,
-                        fallback_reply="Bạn cần chốt đơn trước khi thanh toán.",
-                    )
-                    send_bot_message(db, chat_id, telegram_user_id, reply_text)
-                    return {"ok": True}
-
-                if not has_complete_customer_info(order):
-                    reply_text = build_natural_action_reply(
-                        user_message=text,
-                        suggested_reply=ai_result.get("reply"),
-                        system_result="Hệ thống chưa thể xác nhận thanh toán vì thiếu tên, số điện thoại hoặc địa chỉ.",
-                        menu_text=menu_text,
-                        toppings_text=toppings_text,
-                        cart_text=cart_text,
-                        conversation_history=conversation_history,
-                        fallback_reply="Mình chưa đủ thông tin để xác nhận thanh toán. Bạn vui lòng cập nhật tên, số điện thoại của bạn và địa chỉ giúp mình.",
-                    )
-                    send_bot_message(db, chat_id, telegram_user_id, reply_text)
-                    return {"ok": True}
-
-                order.order_status = "awaiting_payment_confirmation"
-                db.commit()
-                db.refresh(order)
-                confirmation_text = render_payment_confirmation(order)
-                send_bot_message(
+                handle_payment_request_flow(
                     db,
-                    chat_id,
-                    telegram_user_id,
-                    compose_reply(
-                        build_natural_action_reply(
-                            user_message=text,
-                            suggested_reply=ai_result.get("reply"),
-                            system_result="Hệ thống đã chuyển đơn sang bước chờ khách xác nhận thanh toán.",
-                            menu_text=menu_text,
-                            toppings_text=toppings_text,
-                            cart_text=confirmation_text,
-                            conversation_history=conversation_history,
-                            fallback_reply="Mình đã lấy thông tin hiện có từ hệ thống để bạn xác nhận lại trước khi thanh toán.",
-                        ),
-                        "Mình đã lấy thông tin hiện có từ hệ thống để bạn xác nhận lại trước khi thanh toán.",
-                        confirmation_text,
-                    ),
+                    chat_id=chat_id,
+                    telegram_user_id=telegram_user_id,
+                    user_message=text,
+                    conversation_history=conversation_history,
+                    order=order,
+                    suggested_reply=ai_result.get("reply"),
                 )
 
             elif intent == "summary":
@@ -1346,33 +1504,20 @@ async def telegram_webhook(request: Request) -> dict:
 
             else:
                 if looks_like_payment_request(text) and order.items and order.payment_status != "paid":
-                    if order.order_status == "draft" and has_complete_customer_info(order):
-                        order.order_status = "confirmed"
-                        db.commit()
-                        db.refresh(order)
-                    if order.order_status == "confirmed":
-                        order.order_status = "awaiting_payment_confirmation"
-                        db.commit()
-                        db.refresh(order)
-                        confirmation_text = render_payment_confirmation(order)
-                        send_bot_message(
+                    confirmation_text = process_demo_payment_request(db, order)
+                    if confirmation_text:
+                        send_natural_response(
                             db,
-                            chat_id,
-                            telegram_user_id,
-                            compose_reply(
-                                build_natural_action_reply(
-                                    user_message=text,
-                                    suggested_reply=ai_result.get("reply"),
-                                    system_result="Hệ thống đã chuyển đơn sang bước chờ khách xác nhận thanh toán.",
-                                    menu_text=menu_text,
-                                    toppings_text=toppings_text,
-                                    cart_text=confirmation_text,
-                                    conversation_history=conversation_history,
-                                    fallback_reply="Mình đã lấy thông tin hiện có từ hệ thống để bạn xác nhận lại trước khi thanh toán.",
-                                ),
-                                "Mình đã lấy thông tin hiện có từ hệ thống để bạn xác nhận lại trước khi thanh toán.",
-                                confirmation_text,
-                            ),
+                            chat_id=chat_id,
+                            telegram_user_id=telegram_user_id,
+                            user_message=text,
+                            suggested_reply=ai_result.get("reply"),
+                            system_result="Hệ thống đã hiển thị thông tin để khách xác nhận trước khi thanh toán.",
+                            conversation_history=conversation_history,
+                            fallback_reply="Mình gửi lại thông tin để bạn xác nhận trước khi thanh toán.",
+                            order=order,
+                            sections=(confirmation_text,),
+                            cart_override=confirmation_text,
                         )
                         return {"ok": True}
 

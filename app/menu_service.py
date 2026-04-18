@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unicodedata
 
 import pandas as pd
@@ -25,6 +26,12 @@ SIZE_ALIASES = {
     "large": "L",
 }
 
+TEXT_ALIASES = {
+    r"\bcf\b": "ca phe",
+    r"\bcaphe\b": "ca phe",
+    r"\bts\b": "tra sua",
+}
+
 
 def strip_accents(text: str) -> str:
     text = str(text).replace("đ", "d").replace("Đ", "D")
@@ -34,6 +41,9 @@ def strip_accents(text: str) -> str:
 
 def normalize_text(text: str) -> str:
     text = strip_accents(str(text)).lower().strip()
+    text = " ".join(text.split())
+    for pattern, replacement in TEXT_ALIASES.items():
+        text = re.sub(pattern, replacement, text)
     return " ".join(text.split())
 
 
@@ -139,6 +149,12 @@ class MenuService:
         if rows.empty:
             return None
         return rows.iloc[0].to_dict()
+
+    def find_matching_item_names(self, item_name: str) -> list[str]:
+        matched = self._find_by_exact_or_contains(self.drink_df, item_name)
+        if matched.empty:
+            return []
+        return list(dict.fromkeys(str(name) for name in matched["name"].tolist()))
 
     def find_topping(self, topping_name: str) -> dict | None:
         matched = self._find_by_exact_or_contains(self.topping_df, topping_name)

@@ -20,7 +20,7 @@ Bot Telegram cho quán đồ uống, dùng:
 pip install -r requirements.txt
 ```
 
-Tạo file `.env` từ `.env.example`, rồi điền token bot, URL public và OpenAI API key nếu muốn bot hiểu tin nhắn tự nhiên.
+Tạo file `.env` từ `.env.example`, rồi điền token bot, URL public và OpenAI API key nếu muốn bot hiểu tin nhắn tự nhiên. Nếu muốn bot báo đơn sang Telegram của người bán, cấu hình thêm `SELLER_CHAT_ID`.
 
 ## Chạy app local sau khi đã cài đặt và cấu hình `.env`:
 ```bash
@@ -61,3 +61,8 @@ Cho mình 2 trà sữa truyền thống size L thêm kem tươi
 Mình tên An, số điện thoại của mình là 09..., địa chỉ 123 Nguyễn Trãi
 Menu hôm nay có gì?
 ```
+
+## Thông báo cho người bán
+- Cấu hình `SELLER_CHAT_ID` trong `.env`
+- Khi khách `/checkout`, bot sẽ gửi đơn đã chốt tạm thời sang chat của người bán
+- Khi khách `/confirm_pay`, bot sẽ gửi thêm thông báo đơn đã thanh toán

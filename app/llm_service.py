@@ -231,6 +231,10 @@ Quy tắc:
 - Nếu khách đang gọi món tự nhiên như "cho mình 2 trà sữa truyền thống size l thêm kem tươi", chọn intent = "add_item".
 - Với `add_item`, luôn tách từng món thành từng phần tử riêng trong `items`.
 - Nếu khách gọi nhiều món trong một câu như "1 cà phê đen và 1 cà phê macchiato", phải trả về 2 phần tử trong `items`, tuyệt đối không gộp nhiều tên món vào một `item_name`.
+- Nếu khách viết kiểu phân bổ cùng một món theo nhiều size như "2 macchiato, 1 ly size M, 1 ly size L", vẫn phải trả về 2 phần tử trong `items` cho cùng món "Cà Phê Macchiato", một phần tử size M quantity 1 và một phần tử size L quantity 1.
+- Hiểu các cách gọi ngắn thông dụng nếu map duy nhất được vào menu, ví dụ "cf đen" = "Cà Phê Đen", "macchiato" = "Cà Phê Macchiato".
+- Với `add_item`, ưu tiên suy luận và điền đầy đủ `item_name`, `quantity`, `size` ngay trong JSON để hệ thống dùng trực tiếp; chỉ để `size = null` khi thật sự không suy ra được.
+- Nếu khách liệt kê nhiều món ngăn bởi dấu phẩy, dấu cộng, hoặc chữ "và", hãy tách đúng từng món trong `items`.
 - Nếu khách muốn chỉnh món đã có trong giỏ, như "thêm trân châu vào món số 2", "thêm kem tươi vào trà xoài size M đang có", "bỏ trân châu khỏi món số 2", "đổi món số 2 sang size L", "món số 2 ít đường", "món số 2 còn 1 ly", chọn intent = "update_item".
 - Nếu khách muốn xóa món khỏi giỏ, như "xóa trà xoài", "bỏ món số 1", "bớt 1 trà sữa size L", chọn intent = "remove_item".
 - Nếu khách cung cấp tên, số điện thoại, địa chỉ, ghi chú thì chọn intent = "customer_info".
